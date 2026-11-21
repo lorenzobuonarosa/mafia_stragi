@@ -1,0 +1,610 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>La stagione delle stragi – Radar QN</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Libre+Franklin:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,700&display=swap">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="../assets/radar.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+<script src="../assets/radar.js"></script>
+<style>
+  /* ---------- Mappa ---------- */
+  .sm-map { position: relative; margin: 22px 0 0; }
+  #map { height: 440px; width: 100%; background: #e9eaec; outline: none; }
+  :root[data-theme="dark"] #map { background: #1b1c1e; }
+  @media (max-width: 519px) { #map { height: 300px; } }
+
+  /* Tile: toni neutri. Il filtro agisce solo sul livello dei tile, non sui marker,
+     così il rosso dei marker resta l'unico colore forte. */
+  .leaflet-tile { outline: 1px solid transparent; }
+  .leaflet-tile-pane { filter: grayscale(0.92) contrast(0.92) brightness(1.04); }
+  :root[data-theme="dark"] .leaflet-tile-pane {
+    filter: invert(1) hue-rotate(180deg) grayscale(0.85) brightness(0.82) contrast(0.92);
+  }
+
+  /* Controlli e attribuzione nei colori della pagina */
+  .leaflet-container { font-family: var(--sans); }
+  .leaflet-bar { box-shadow: none !important; border: 1px solid var(--rule) !important; border-radius: 2px; }
+  .leaflet-bar a, .leaflet-bar a:hover {
+    background: var(--bg); color: var(--ink); border-bottom: 1px solid var(--rule);
+    width: 32px; height: 32px; line-height: 32px; font-weight: 500;
+  }
+  .leaflet-bar a:last-child { border-bottom: 0; }
+  .leaflet-bar a:hover { background: var(--tip-bg); }
+  .leaflet-bar a.leaflet-disabled { color: var(--grey-light); background: var(--bg); }
+  .leaflet-control-attribution {
+    font-size: 10px; line-height: 1.5; padding: 1px 6px;
+    background: color-mix(in srgb, var(--bg) 82%, transparent) !important; color: var(--ink-2);
+  }
+  .leaflet-control-attribution a { color: var(--ink-2); text-decoration: underline; }
+
+  /* ---------- Marker ---------- */
+  .sm { background: none; border: 0; }
+  .sm__pin { position: absolute; left: 0; top: 0; width: 0; height: 0; }
+  .sm__hit { position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px; border-radius: 50%; cursor: pointer; }
+  .sm__dot {
+    position: absolute; left: 0; top: 0; transform: translate(-50%, -50%);
+    border-radius: 50%; box-sizing: border-box; pointer-events: none;
+    transition: width .3s ease, height .3s ease, background-color .3s ease, border-color .3s ease;
+  }
+  /* passo 0: tutti grigi */
+  .sm.is-idle   .sm__dot { width: 13px; height: 13px; background: var(--grey); border: 2px solid var(--bg); }
+  /* futuri: solo contorno grigio */
+  .sm.is-future .sm__dot { width: 11px; height: 11px; background: var(--bg); border: 2px solid var(--grey); }
+  /* già visti: grigio scuro pieno, più piccoli */
+  .sm.is-seen   .sm__dot { width: 9px; height: 9px; background: var(--grey-dark); border: 1.5px solid var(--bg); }
+  /* corrente: rosso pieno */
+  .sm.is-current .sm__dot { width: 18px; height: 18px; background: var(--red); border: 2.5px solid var(--bg); box-shadow: 0 0 0 1px var(--red); }
+  .sm.is-hidden { display: none; }
+  /* gruppo (le tre stragi di Roma a zoom nazionale) */
+  .sm.is-cluster .sm__dot {
+    width: 26px; height: 26px; background: var(--grey-dark); border: 2px solid var(--bg);
+    display: grid; place-items: center; color: var(--bg);
+    font: 700 13px/1 var(--sans); font-variant-numeric: tabular-nums;
+  }
+
+  /* Punto pulsante tipo sonar: onde concentriche che partono dal luogo, di continuo.
+     Una zona morbida sotto + tre anelli sfasati. */
+  .sm__zone, .sm__r { position: absolute; left: 0; top: 0; border-radius: 50%; pointer-events: none; display: none; }
+  .sm__zone {
+    width: 64px; height: 64px; margin: -32px 0 0 -32px;
+    background: rgba(209, 69, 47, 0.14);
+    background: radial-gradient(circle, color-mix(in srgb, var(--red) 30%, transparent) 0%, color-mix(in srgb, var(--red) 6%, transparent) 70%, transparent 100%);
+  }
+  .sm__r {
+    width: 132px; height: 132px; margin: -66px 0 0 -66px;
+    border: 2px solid var(--red); opacity: 0; transform: scale(0.1);
+  }
+  .sm.is-current .sm__zone, .sm.is-current .sm__r { display: block; }
+  .sm.is-current .sm__r { animation: sm-sonar 3.6s cubic-bezier(0.15, 0.55, 0.3, 1) infinite; }
+  .sm.is-current .sm__r2 { animation-delay: 1.2s; }
+  .sm.is-current .sm__r3 { animation-delay: 2.4s; }
+  @keyframes sm-sonar {
+    0%   { transform: scale(0.1); opacity: 0.9; }
+    65%  { opacity: 0.22; }
+    100% { transform: scale(1);   opacity: 0; }
+  }
+  @media (max-width: 519px) {
+    .sm__r { width: 96px; height: 96px; margin: -48px 0 0 -48px; }
+    .sm__zone { width: 52px; height: 52px; margin: -26px 0 0 -26px; }
+  }
+
+  /* Etichetta diretta del luogo corrente */
+  .sm__lbl {
+    position: absolute; left: 17px; top: 0; transform: translateY(-50%);
+    display: none; width: max-content; max-width: min(230px, 46vw);
+    font: 600 13px/1.25 var(--sans); color: var(--ink); pointer-events: none;
+    text-shadow: 0 0 2px var(--bg), 0 0 3px var(--bg), 0 0 5px var(--bg), 0 0 8px var(--bg);
+  }
+  .sm.is-current .sm__lbl, .sm.is-cluster .sm__lbl { display: block; }
+  .sm.is-flip .sm__lbl { left: auto; right: 17px; text-align: right; }
+  .sm.is-cluster .sm__lbl { left: 20px; }
+  .sm.is-cluster.is-flip .sm__lbl { left: auto; right: 20px; }
+
+  /* ---------- Striscia temporale ---------- */
+  .tl { position: relative; margin: 14px 0 0; }
+  .tl svg { display: block; overflow: visible; width: 100%; }
+  .tl text { font-family: var(--sans); font-size: 11px; fill: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .tl-axis { stroke: var(--grey-light); stroke-width: 1; shape-rendering: crispEdges; }
+  .tl-month { stroke: var(--grey-light); stroke-width: 1; shape-rendering: crispEdges; }
+  .tl-ref line { stroke: var(--grey); stroke-width: 1; stroke-dasharray: 2 2; shape-rendering: crispEdges; }
+  .tl-ref text { fill: var(--ink-2); }
+  .tl-ref rect.tl-hit { fill: transparent; cursor: pointer; }
+  .tl-tick { fill: var(--grey); }
+  .tl-tick.is-seen { fill: var(--grey-dark); }
+  .tl-tick.is-current { fill: var(--red); }
+  .tl-hit { fill: transparent; cursor: pointer; }
+  .tl-ev:focus { outline: none; }
+  .tl-ev:focus-visible .tl-tick { stroke: var(--ink); stroke-width: 1; }
+
+  /* ---------- Controlli ---------- */
+  .ctrl { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 20px 0 0; }
+  .btn {
+    font: 600 14px/1 var(--sans); color: var(--ink); background: transparent;
+    border: 1px solid var(--grey-light); border-radius: 2px; padding: 0 16px; min-height: 40px;
+    cursor: pointer; transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+  }
+  .btn:hover:not(:disabled) { border-color: var(--ink); }
+  .btn:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+  .btn:disabled { color: var(--grey-light); border-color: var(--rule); cursor: default; }
+  .btn--primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  .btn--primary:hover:not(:disabled) { background: var(--grey-dark); border-color: var(--grey-dark); }
+  .btn--primary:disabled { background: transparent; color: var(--grey-light); border-color: var(--rule); }
+  .dots { display: flex; align-items: center; gap: 2px; }
+  .dot {
+    appearance: none; border: 0; background: transparent; padding: 0; cursor: pointer;
+    width: 24px; height: 40px; display: grid; place-items: center;
+  }
+  .dot::before {
+    content: ""; width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box;
+    border: 2px solid var(--grey); background: var(--bg); transition: background-color .2s, border-color .2s, transform .2s;
+  }
+  .dot.is-seen::before { background: var(--grey-dark); border-color: var(--grey-dark); }
+  .dot.is-current::before { background: var(--red); border-color: var(--red); transform: scale(1.3); }
+  .dot:focus-visible { outline: 2px solid var(--blue); outline-offset: -4px; border-radius: 4px; }
+  @media (max-width: 380px) { .dot { width: 20px; } .btn { padding: 0 12px; } }
+
+  /* ---------- Scheda ---------- */
+  .card { margin: 16px 0 0; padding: 18px 0 0; border-top: 1px solid var(--rule); touch-action: pan-y; }
+  .card__in { animation: card-in .35s ease both; }
+  @keyframes card-in { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+  .c-meta { font-size: 12px; line-height: 1.4; color: var(--ink-2); margin: 0 0 6px; font-variant-numeric: tabular-nums; }
+  .c-title {
+    font-family: var(--serif); font-weight: 700; font-size: clamp(24px, 5.2vw, 30px);
+    line-height: 1.1; letter-spacing: -0.005em; color: var(--title); margin: 0 0 14px; text-wrap: balance;
+  }
+  .c-h { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2); margin: 18px 0 4px; }
+  .c-p { font-size: 15px; line-height: 1.55; margin: 0; }
+  .c-lead { font-size: 16px; line-height: 1.5; margin: 0 0 18px; max-width: 560px; }
+  .c-names { font-size: 14px; line-height: 1.55; margin: 12px 0 0; font-weight: 500; }
+  .c-note { font-size: 12.5px; line-height: 1.5; color: var(--ink-2); margin: 8px 0 0; }
+  .c-act { margin-top: 4px; }
+
+  .bn { display: flex; flex-wrap: wrap; gap: 8px 36px; margin: 4px 0 0; align-items: flex-start; }
+  .bn__item { min-width: 0; }
+  .bn__num {
+    display: block; font-size: 44px; line-height: 1; font-weight: 700; letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums; color: var(--ink);
+  }
+  .bn__num--txt { font-size: 20px; line-height: 1.15; letter-spacing: -0.01em; max-width: 190px; }
+  .bn__lab { display: block; font-size: 14px; color: var(--ink-2); margin-top: 6px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sm.is-current .sm__r { animation: none; opacity: 0.4; transform: scale(0.42); }
+    .sm.is-current .sm__r2, .sm.is-current .sm__r3 { display: none; }
+    .card__in { animation: none; }
+    .sm__dot, .dot::before { transition: none; }
+  }
+</style>
+</head>
+<body>
+<main class="radar">
+  <header>
+    <h1 class="r-title"><span>La stagione delle stragi</span><span>Da Capaci a San Giorgio al Velabro, luogo per luogo</span></h1>
+    <p class="r-sub">Le sette autobombe con cui Cosa nostra colpì lo Stato tra il 23 maggio 1992 e il 28 luglio 1993</p>
+  </header>
+
+  <div class="sm-map">
+    <div id="map" role="region" aria-label="Mappa dell'Italia con i luoghi delle sette stragi"></div>
+  </div>
+
+  <div class="tl" id="tl"></div>
+
+  <nav class="ctrl" aria-label="Avanzamento">
+    <button type="button" class="btn" id="prev">Indietro</button>
+    <div class="dots" id="dots" role="group" aria-label="Passi"></div>
+    <button type="button" class="btn btn--primary" id="next">Avanti</button>
+  </nav>
+
+  <section class="card" id="card" aria-live="polite"></section>
+
+  <footer class="r-foot">
+    <span>Fonti: Wikipedia, Polizia di Stato, Commissione parlamentare antimafia, sentenze della Corte d'assise di Firenze. Mappa: © OpenStreetMap contributors</span>
+    <span>Elaborazione Radar – QN</span>
+  </footer>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- Costanti di configurazione ----------
+  var TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+  var TILE_ATTRIBUTION = '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors';
+  var FLY_SECONDS = 2.5;
+  var CLUSTER_METERS = 15000;     // punti della stessa città più vicini di così: un solo marker a zoom nazionale
+
+  // Riferimenti storici sulla striscia temporale (grigi, non sono stragi)
+  var REFS = [
+    { date: new Date(1992, 5, 8),  label: "8 giugno 1992 · 41-bis ai mafiosi" },
+    { date: new Date(1993, 0, 15), label: "15 gennaio 1993 · arrestato Riina" }
+  ];
+
+  var R = window.Radar, d3 = window.d3, L = window.L;
+  var reduced = R.reduced;
+  var fmt = R.fmt;
+  var longDate = R.timeLocale.format("%-d %B %Y");
+
+  var WORDS = ["zero", "uno", "due", "tre", "quattro", "cinque", "sei", "sette", "otto", "nove", "dieci", "undici",
+    "dodici", "tredici", "quattordici", "quindici", "sedici", "diciassette", "diciotto", "diciannove", "venti"];
+  function word(n) { return n >= 0 && n < WORDS.length ? WORDS[n] : String(n); }
+  function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function plural(n, one, many) { return n === 1 ? one : many; }
+
+  // ---------- Dati ----------
+  R.loadCSV("../data/stragi.csv").then(init).catch(function (e) { R.fail(document.getElementById("card"), e); });
+
+  function init(raw) {
+    // Nota: lat/lon nel CSV hanno il punto decimale (WGS84), quindi parseFloat e non Radar.num.
+    var rows = raw.map(function (r) {
+      var dm = r.data.split("/");
+      var tm = /^(\d{1,2}):(\d{2})$/.exec(r.ora);
+      var date = new Date(+dm[2], +dm[1] - 1, +dm[0], tm ? +tm[1] : 0, tm ? +tm[2] : 0);
+      var feritiRaw = (r.feriti || "").trim();
+      return {
+        n: +r.ordine, date: date, ora: r.ora, hasTime: !!tm,
+        luogo: r.luogo, citta: r.citta,
+        city: (/\(([^)]+)\)/.exec(r.citta) || [null, r.citta])[1],   // "Capaci (Palermo)" -> Palermo
+        ll: L.latLng(parseFloat(r.lat), parseFloat(r.lon)), zoom: +r.zoom,
+        titolo: r.titolo, obiettivo: r.obiettivo, cosa: r.cosa, perche: r.perche,
+        morti: R.num(r.morti) || 0,
+        feritiRaw: feritiRaw,
+        feriti: /^\d+$/.test(feritiRaw) ? +feritiRaw : null,
+        pending: /^\[.*\]$/.test(feritiRaw) || feritiRaw === "",
+        vittime: r.vittime ? r.vittime.split(" · ") : [], nota: r.nota_bilancio
+      };
+    }).sort(function (a, b) { return a.n - b.n; });
+    var N = rows.length;
+    var LAST = N + 1;                       // indice del passo di chiusura
+    var cur = 0;                            // 0 apertura, 1..N luoghi, N+1 chiusura
+
+    // ---------- Mappa ----------
+    var map = L.map("map", {
+      zoomControl: true, attributionControl: true,
+      scrollWheelZoom: false,               // la rotellina scorre la pagina
+      dragging: !L.Browser.mobile,          // su touch un dito scorre la pagina, non la mappa
+      keyboard: false,                      // le frecce servono per i passi
+      zoomSnap: 0.25, zoomDelta: 1, minZoom: 5, maxZoom: 18, worldCopyJump: false
+    });
+    map.attributionControl.setPrefix(false);
+    map.attributionControl.setPosition("bottomright");
+    L.tileLayer(TILE_URL, { attribution: TILE_ATTRIBUTION, maxZoom: 19 }).addTo(map);
+
+    var allBounds = L.latLngBounds(rows.map(function (r) { return r.ll; }));
+    var FIT = { padding: [36, 36] };
+    function fitAll(animate) {
+      if (animate && !reduced) map.flyToBounds(allBounds, { padding: FIT.padding, duration: FLY_SECONDS });
+      else map.fitBounds(allBounds, { padding: FIT.padding, animate: false });
+    }
+    fitAll(false);
+
+    // ---------- Gruppi di punti vicini (a zoom nazionale un solo marker con il numero) ----------
+    // Roma (3 attentati) e Palermo (Capaci e via D'Amelio, a ~10 km) a zoom nazionale sarebbero pallini sovrapposti.
+    var clusters = [];
+    d3.group(rows, function (r) { return r.city; }).forEach(function (grp, city) {
+      var rest = grp.slice();
+      while (rest.length) {
+        var base = rest.shift();
+        var near = [base].concat(rest.filter(function (g) { return g.ll.distanceTo(base.ll) < CLUSTER_METERS; }));
+        rest = rest.filter(function (g) { return near.indexOf(g) < 0; });
+        if (near.length < 2) continue;
+        near.forEach(function (g) { g.inCluster = true; });
+        clusters.push({
+          rows: near, city: city,
+          ll: L.latLng(d3.mean(near, function (g) { return g.ll.lat; }), d3.mean(near, function (g) { return g.ll.lng; }))
+        });
+      }
+    });
+
+    function pinHTML(label, inner) {
+      return '<div class="sm__pin"><i class="sm__zone"></i><i class="sm__r sm__r1"></i><i class="sm__r sm__r2"></i><i class="sm__r sm__r3"></i>' +
+        '<i class="sm__hit"></i><b class="sm__dot">' + (inner || "") + '</b><span class="sm__lbl">' + esc(label) + "</span></div>";
+    }
+    function makeMarker(ll, cls, html, title) {
+      var m = L.marker(ll, {
+        icon: L.divIcon({ className: "sm " + cls, html: html, iconSize: [0, 0], iconAnchor: [0, 0] }),
+        title: title, alt: title, keyboard: true, riseOnHover: false
+      });
+      m.addTo(map);
+      return m;
+    }
+    rows.forEach(function (r) {
+      r.marker = makeMarker(r.ll, "is-future", pinHTML(r.luogo), r.luogo);
+      r.marker.on("click", function () { go(r.n); });
+    });
+    clusters.forEach(function (c) {
+      c.marker = makeMarker(c.ll, "is-cluster", pinHTML(c.city, String(c.rows.length)), c.city + ": " + c.rows.length + " attentati");
+      c.marker.on("click", function () { go(c.rows[0].n); });
+    });
+    function setState(marker, state, extra) {
+      var el = marker.getElement();
+      if (!el) return;
+      el.className = el.className.replace(/\bis-(idle|future|seen|current|hidden|cluster)\b/g, "").replace(/\s+/g, " ").trim();
+      el.classList.add("is-" + state);
+      if (extra) el.classList.add(extra);
+    }
+    function updateMarkers() {
+      rows.forEach(function (r) {
+        var state;
+        if (cur === 0) state = "idle";
+        else if (cur === LAST) state = "seen";
+        else state = r.n === cur ? "current" : (r.n < cur ? "seen" : "future");
+        if (r.inCluster && cur === 0) state = "hidden";
+        setState(r.marker, state);
+        r.marker.setZIndexOffset(state === "current" ? 1000 : (state === "seen" ? 100 : 0));
+      });
+      clusters.forEach(function (c) { setState(c.marker, cur === 0 ? "cluster" : "hidden"); });
+      flipLabels();
+    }
+    // etichetta a sinistra se il marker è vicino al bordo destro della mappa
+    function flipLabels() {
+      var size = map.getSize();
+      function flip(marker) {
+        var el = marker.getElement();
+        if (!el) return;
+        var p = map.latLngToContainerPoint(marker.getLatLng());
+        el.classList.toggle("is-flip", p.x > size.x - 240);
+      }
+      rows.forEach(function (r) { flip(r.marker); });
+      clusters.forEach(function (c) { flip(c.marker); });
+    }
+    map.on("moveend zoomend resize", flipLabels);
+
+    // ---------- Telecamera ----------
+    function camera(step, prev) {
+      if (step === 0 || step === LAST) { fitAll(prev !== -1); return; }
+      var r = rows[step - 1];
+      if (prev === -1 || reduced) { map.setView(r.ll, r.zoom, { animate: false }); return; }
+      var p = rows[prev - 1];
+      // spostamento breve nella stessa città (San Giovanni ↔ San Giorgio): zoom più largo, si vedono entrambi i luoghi
+      if (p && Math.abs(prev - step) === 1 && p.city === r.city && p.ll.distanceTo(r.ll) < CLUSTER_METERS) {
+        map.flyToBounds(L.latLngBounds([p.ll, r.ll]), { padding: [70, 70], maxZoom: 16, duration: 1.6 });
+        return;
+      }
+      // il volo di Leaflet si allarga da solo sulle lunghe distanze (Palermo-Roma, Roma-Firenze, …)
+      map.flyTo(r.ll, r.zoom, { duration: FLY_SECONDS });
+    }
+
+    // ---------- Striscia temporale ----------
+    var tlHost = document.getElementById("tl");
+    var tlTip = R.tooltip(tlHost);
+    R.dismissOutside(tlHost, tlTip.hide);
+    var tlState = null;
+    var D0 = new Date(1992, 4, 1), D1 = new Date(1993, 7, 1);       // maggio 1992 – luglio 1993 compreso
+    var MONTH_TICKS = [new Date(1992, 4, 1), new Date(1992, 7, 1), new Date(1992, 10, 1), new Date(1993, 1, 1), new Date(1993, 4, 1), new Date(1993, 7, 1)];
+    var shortMonth = R.timeLocale.format("%b");
+    function monthLabel(d, i, narrow) {
+      var y = d.getFullYear();
+      var withYear = i === 0 || d.getMonth() === 1;
+      return shortMonth(d) + (withYear ? " ’" + String(y).slice(2) : "");
+    }
+    function buildStrip() {
+      var W = Math.floor(tlHost.getBoundingClientRect().width);
+      if (!W) return;
+      var narrow = R.isNarrow(W);
+      var H = narrow ? 62 : 92;
+      var AX = 40;
+      d3.select(tlHost).select("svg").remove();
+      var x = d3.scaleTime().domain([D0, D1]).range([0, W - 4]);
+      var svg = d3.select(tlHost).insert("svg", ":first-child")
+        .attr("viewBox", "0 0 " + W + " " + H).attr("height", H)
+        .attr("role", "img")
+        .attr("aria-label", "Linea del tempo da " + longDate(rows[0].date) + " a " + longDate(rows[N - 1].date) + ": " + word(N) + " attentati, con un lungo intervallo tra la prima e la seconda stagione");
+      svg.append("line").attr("class", "tl-axis").attr("x1", 0).attr("x2", W - 4).attr("y1", AX + 0.5).attr("y2", AX + 0.5);
+      // mesi
+      MONTH_TICKS.forEach(function (d, i) {
+        var px = x(d), last = i === MONTH_TICKS.length - 1;
+        svg.append("line").attr("class", "tl-month").attr("x1", px + 0.5).attr("x2", px + 0.5).attr("y1", AX).attr("y2", AX + 5);
+        svg.append("text").attr("x", last ? px : px + 3).attr("y", AX + 17).attr("text-anchor", last ? "end" : "start").text(monthLabel(d, i, narrow));
+      });
+      // riferimenti in grigio
+      REFS.forEach(function (ref) {
+        var px = Math.round(x(ref.date)) + 0.5;
+        var g = svg.append("g").attr("class", "tl-ref").attr("role", "img").attr("aria-label", ref.label);
+        g.append("line").attr("x1", px).attr("x2", px).attr("y1", 14).attr("y2", narrow ? AX + 6 : AX + 28);
+        if (!narrow) {
+          var t = g.append("text").attr("x", px + 5).attr("y", AX + 46).text(ref.label);
+          var tw = t.node().getComputedTextLength();
+          if (px + 5 + tw > W) t.attr("x", px - 5).attr("text-anchor", "end");
+        } else {
+          // su mobile l'etichetta diventa un tooltip al tocco
+          g.append("rect").attr("class", "tl-hit").attr("x", px - 12).attr("y", 0).attr("width", 24).attr("height", H)
+            .on("pointerdown", showRef).on("click", showRef);
+          function showRef(ev) {
+            ev.stopPropagation();
+            tlTip.show('<div class="r-tip__t">' + esc(ref.label) + "</div>", px, 8);
+          }
+        }
+      });
+      // tacche delle stragi: x dalla data, poi distanziate di almeno 6 px (le tre del 27-28 luglio 1993 cadono a pochi px)
+      var xs = rows.map(function (r) { return x(r.date); });
+      var SEP = 6;
+      for (var i = 1; i < xs.length; i++) xs[i] = Math.max(xs[i], xs[i - 1] + SEP);
+      xs[xs.length - 1] = Math.min(xs[xs.length - 1], W - 6);
+      for (var j = xs.length - 2; j >= 0; j--) xs[j] = Math.min(xs[j], xs[j + 1] - SEP);
+      var ticks = rows.map(function (r, k) {
+        var g = svg.append("g").attr("class", "tl-ev").attr("tabindex", 0).attr("role", "button")
+          .attr("aria-label", "Passo " + r.n + ": " + longDate(r.date) + ", " + r.luogo)
+          .on("click", function () { go(r.n); })
+          .on("keydown", function (ev) { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); go(r.n); } });
+        g.append("title").text(longDate(r.date) + " · " + r.citta);
+        g.append("rect").attr("class", "tl-hit").attr("x", xs[k] - 4).attr("y", 0).attr("width", 8).attr("height", AX);
+        var t = g.append("rect").attr("class", "tl-tick").attr("rx", 1).attr("x", xs[k] - 1.5).attr("width", 3);
+        return { g: g, tick: t, cx: xs[k] };
+      });
+      svg.selectAll(".tl-ref").raise();      // i riferimenti sopra le tacche: al tocco vince il più vicino
+      tlState = { ticks: ticks, AX: AX };
+      updateStrip(true);
+    }
+    function updateStrip(instant) {
+      if (!tlState) return;
+      var AX = tlState.AX, dur = instant || reduced ? 0 : 220;
+      tlState.ticks.forEach(function (t, k) {
+        var n = k + 1;
+        var isCur = cur === n, isSeen = cur === LAST || (cur > 0 && n < cur);
+        t.tick.classed("is-current", isCur).classed("is-seen", isSeen);
+        var h = isCur ? 28 : 14, w = isCur ? 5 : 3;
+        t.tick.transition().duration(dur)
+          .attr("y", AX - h).attr("height", h).attr("x", t.cx - w / 2).attr("width", w);
+        if (isCur) { t.g.raise(); d3.select(tlHost).selectAll(".tl-ref").raise(); }
+      });
+    }
+    var lastW = 0;
+    function resizeStrip() {
+      var w = Math.floor(tlHost.getBoundingClientRect().width);
+      if (w && w !== lastW) { lastW = w; buildStrip(); }
+    }
+    if (window.ResizeObserver) new ResizeObserver(resizeStrip).observe(tlHost);
+    window.addEventListener("resize", resizeStrip);
+    resizeStrip();
+
+    // ---------- Pallini di avanzamento ----------
+    var dotsHost = document.getElementById("dots");
+    rows.forEach(function (r) {
+      var b = document.createElement("button");
+      b.type = "button"; b.className = "dot";
+      b.setAttribute("aria-label", "Passo " + r.n + " di " + N + ": " + r.luogo);
+      b.addEventListener("click", function () { go(r.n); });
+      dotsHost.appendChild(b);
+    });
+    var prevBtn = document.getElementById("prev"), nextBtn = document.getElementById("next");
+    prevBtn.addEventListener("click", function () { go(cur - 1); });
+    nextBtn.addEventListener("click", function () { go(cur + 1); });
+    function updateControls() {
+      Array.prototype.forEach.call(dotsHost.children, function (b, k) {
+        var n = k + 1;
+        b.className = "dot" + (cur === n ? " is-current" : (cur === LAST || (cur > 0 && n < cur) ? " is-seen" : ""));
+        if (cur === n) b.setAttribute("aria-current", "step"); else b.removeAttribute("aria-current");
+      });
+      prevBtn.disabled = cur === 0;
+      nextBtn.disabled = cur === LAST;
+    }
+
+    // ---------- Scheda ----------
+    var card = document.getElementById("card");
+    var countToken = 0;
+    function bnItem(value, label, raw) {
+      if (value != null) return '<div class="bn__item"><span class="bn__num" data-count="' + value + '">' + fmt(value) + '</span><span class="bn__lab">' + label + "</span></div>";
+      var txt = /^\[.*\]$/.test(raw) || raw === "" ? "n.d." : raw;
+      return '<div class="bn__item"><span class="bn__num bn__num--txt">' + esc(txt) + '</span><span class="bn__lab">' + label + "</span></div>";
+    }
+    function totals() {
+      var morti = d3.sum(rows, function (r) { return r.morti; });
+      // feriti: i testi condivisi (le due chiese di Roma, "22 nei due attentati") contano una volta sola
+      var seen = {}, feriti = 0, missing = [];
+      rows.forEach(function (r) {
+        if (r.feriti != null) { feriti += r.feriti; return; }
+        if (r.pending) { missing.push(r); return; }
+        if (seen[r.feritiRaw]) return;
+        seen[r.feritiRaw] = true;
+        var m = /^\d+/.exec(r.feritiRaw);
+        if (m) feriti += +m[0]; else missing.push(r);
+      });
+      var withVictims = rows.filter(function (r) { return r.morti > 0; }).length;
+      var cities = d3.groups(rows, function (r) { return r.city; }).length;
+      return { morti: morti, feriti: feriti, missing: missing, withVictims: withVictims, without: N - withVictims, cities: cities };
+    }
+    function months(a, b) { return (b.getFullYear() - a.getFullYear()) * 12 + (b.getMonth() - a.getMonth()); }
+
+    function cardHTML(step) {
+      if (step === 0) {
+        var m = months(rows[0].date, rows[N - 1].date);
+        return '<div class="card__in">' +
+          '<h2 class="c-title">' + cap(word(N)) + " autobombe in " + word(m) + " mesi</h2>" +
+          '<p class="c-lead">Dalla Sicilia al continente: premi Avanti per seguire la stagione delle stragi dal ' + longDate(rows[0].date) + " al " + longDate(rows[N - 1].date) + ".</p>" +
+          '<div class="c-act"><button type="button" class="btn btn--primary" data-act="next">Comincia</button></div></div>';
+      }
+      if (step === LAST) {
+        var t = totals();
+        var sentence = cap(word(t.withVictims)) + " " + plural(t.withVictims, "strage con vittime", "stragi con vittime") + ", " +
+          word(t.without) + " " + plural(t.without, "attentato senza morti", "attentati senza morti") + ", in " + word(t.cities) + " " + plural(t.cities, "città", "città");
+        var note = t.missing.length
+          ? '<p class="c-note">Nel totale dei feriti non è incluso il dato di ' + t.missing.map(function (r) { return esc(r.titolo.replace(/^La strage di |^L'attentato di |^L'attentato a /, "")); }).join(", ") + ": non ancora verificato.</p>" : "";
+        return '<div class="card__in">' +
+          '<h2 class="c-title">Il bilancio della stagione delle stragi</h2>' +
+          '<div class="bn">' + bnItem(t.morti, plural(t.morti, "morto", "morti")) + bnItem(t.feriti, plural(t.feriti, "ferito", "feriti")) + "</div>" +
+          '<p class="c-p" style="margin-top:16px">' + sentence + ".</p>" + note +
+          '<div class="c-act" style="margin-top:16px"><button type="button" class="btn btn--primary" data-act="restart">Ricomincia</button></div></div>';
+      }
+      var r = rows[step - 1];
+      var when = longDate(r.date) + " · " + (r.hasTime ? "ore " + r.ora : r.ora) + " · " + r.citta;
+      return '<div class="card__in">' +
+        '<p class="c-meta">' + esc(when) + "</p>" +
+        '<h2 class="c-title">' + esc(r.titolo) + "</h2>" +
+        '<h3 class="c-h">Obiettivo</h3><p class="c-p">' + esc(r.obiettivo) + "</p>" +
+        '<h3 class="c-h">Cosa è successo</h3><p class="c-p">' + esc(r.cosa) + "</p>" +
+        '<h3 class="c-h">Perché</h3><p class="c-p">' + esc(r.perche) + "</p>" +
+        '<h3 class="c-h">Il bilancio</h3>' +
+        '<div class="bn">' + bnItem(r.morti, plural(r.morti, "morto", "morti")) + bnItem(r.feriti, r.feriti === 1 ? "ferito" : "feriti", r.feritiRaw) + "</div>" +
+        (r.vittime.length ? '<p class="c-names">' + r.vittime.map(esc).join(" · ") + "</p>" : "") +
+        (r.nota ? '<p class="c-note">' + esc(r.nota) + "</p>" : "") + "</div>";
+    }
+    function renderCard() {
+      card.innerHTML = cardHTML(cur);
+      var token = ++countToken;
+      // i big number contano fino al valore quando la scheda cambia
+      Array.prototype.forEach.call(card.querySelectorAll("[data-count]"), function (el) {
+        var v = +el.getAttribute("data-count");
+        if (reduced || v === 0) { el.textContent = fmt(v); return; }
+        var i = d3.interpolateNumber(0, v), t0 = null, dur = 900;
+        el.textContent = fmt(0);
+        requestAnimationFrame(function step(ts) {
+          if (token !== countToken) return;
+          if (t0 === null) t0 = ts;
+          var k = Math.min(1, (ts - t0) / dur);
+          el.textContent = fmt(Math.round(i(d3.easeCubicOut(k))));
+          if (k < 1) requestAnimationFrame(step);
+        });
+      });
+    }
+    card.addEventListener("click", function (e) {
+      var b = e.target.closest ? e.target.closest("[data-act]") : null;
+      if (!b) return;
+      go(b.getAttribute("data-act") === "restart" ? 0 : cur + 1);
+    });
+
+    // ---------- Navigazione ----------
+    function go(step, first) {
+      step = Math.max(0, Math.min(LAST, step));
+      if (!first && step === cur) return;
+      var prev = first ? -1 : cur;
+      cur = step;
+      updateMarkers(); updateStrip(first); updateControls(); renderCard();
+      camera(cur, prev);
+      R.scheduleHeight();
+    }
+
+    // frecce da tastiera
+    document.addEventListener("keydown", function (e) {
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+      var t = e.target;
+      if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+      if (e.key === "ArrowRight") { e.preventDefault(); go(cur + 1); }
+      else if (e.key === "ArrowLeft") { e.preventDefault(); go(cur - 1); }
+    });
+    // swipe: solo sulla scheda, mai sulla mappa
+    var sx = 0, sy = 0, st = 0;
+    card.addEventListener("touchstart", function (e) {
+      if (e.touches.length !== 1) { st = 0; return; }
+      sx = e.touches[0].clientX; sy = e.touches[0].clientY; st = Date.now();
+    }, { passive: true });
+    card.addEventListener("touchend", function (e) {
+      if (!st || Date.now() - st > 800) return;
+      var t = e.changedTouches[0], dx = t.clientX - sx, dy = t.clientY - sy;
+      st = 0;
+      if (Math.abs(dx) > 50 && Math.abs(dx) > 1.6 * Math.abs(dy)) go(dx < 0 ? cur + 1 : cur - 1);
+    }, { passive: true });
+
+    go(0, true);
+    window.__stragi = { map: map, go: go, rows: rows, get step() { return cur; } };   // utile per i test
+  }
+})();
+</script>
+</body>
+</html>
