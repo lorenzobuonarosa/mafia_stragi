@@ -215,7 +215,7 @@
   <section class="card" id="card" aria-live="polite"></section>
 
   <footer class="r-foot">
-    <span>Fonti: Wikipedia, Polizia di Stato, Commissione parlamentare antimafia, sentenze della Corte d'assise di Firenze. Mappa: © OpenStreetMap contributors</span>
+    <span>Fonti: Polizia di Stato, Commissione parlamentare antimafia, sentenze della Corte d'assise di Firenze. Mappa: © OpenStreetMap contributors</span>
     <span>Elaborazione Radar – QN</span>
   </footer>
 </main>
@@ -227,10 +227,17 @@
   // ---------- Costanti di configurazione ----------
   var TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
   var TILE_ATTRIBUTION = '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors';
-  var FLY_MIN = 3.4, FLY_MAX = 7.5;   // secondi: durata minima e massima del volo tra due luoghi
-  var FLY_LEVELS_PER_SEC = 2.3;      // velocità media di zoom: più basso = volo più lento
-  var FLY_LANDING = 1.5;             // quanto si allunga la frenata verso terra (1 = nessuna, più alto = più lenta)
+  // Volo: la velocità di zoom (livelli al secondo) è limitata e scende man mano che ci si avvicina a terra,
+  // in proporzione ai livelli che mancano: l'atterraggio rallenta in modo continuo, senza scatti finali.
+  var FLY_VMAX = 3.2;                // velocità massima, ad alta quota (livelli di zoom al secondo)
+  var FLY_V_LAND = 0.45;             // velocità nell'ultimo istante prima di toccare terra
+  var FLY_K_LAND = 0.6;              // quanto accelera allontanandosi da terra in discesa (più basso = discesa più lenta)
+  var FLY_V_TAKEOFF = 0.6, FLY_K_TAKEOFF = 1.3;   // decollo: parte piano e prende quota più in fretta
+  var FLY_PAN_W = 1.5;               // peso dello spostamento laterale (in schermate) rispetto ai livelli di zoom
+  var FLY_MIN = 2.5, FLY_MAX = 9;    // secondi: durata minima e massima di un volo (oltre il massimo si accorcia solo il tratto in quota)
+  var FLY_LOW_LEVELS = 3;            // gli ultimi livelli prima di terra che non vengono mai accelerati
   var FLY_ARC = 1.2;                 // quanto si allarga il volo a metà strada (più alto = si allontana di più)
+  var NEAR_HOP_METERS = 4000;        // passi consecutivi più vicini di così (le due chiese di Roma): inquadra entrambi
   var OV_SPACING = 27;               // px tra i numeri affiancati in mappa generale
   var CLUSTER_METERS = 15000;     // luoghi della stessa città più vicini di così: numeri affiancati in mappa generale
 
@@ -303,11 +310,10 @@
     function overviewTarget() { return map._getBoundsCenterZoom(allBounds, FIT); }
 
     // ---------- Volo morbido ----------
-    // Stessa traiettoria di Leaflet flyTo (si allarga sulle lunghe distanze, poi si stringe sul nuovo luogo), ma:
-    //  - il tempo scorre sui "livelli di zoom percorsi", non sul parametro della curva: la velocità di zoom resta contenuta
-    //    (picchi sotto i 4 livelli al secondo, e meno di 2 nell'ultimo tratto, contro i ~10 di un'easing normale) e non si concentra nell'avvicinamento;
-    //  - partenza dolce e frenata molto lunga verso terra (FLY_LANDING);
-    //  - la durata cresce con il percorso (FLY_LEVELS_PER_SEC), tra FLY_MIN e FLY_MAX.
+    // Stessa traiettoria di Leaflet flyTo (si allarga sulle lunghe distanze, poi si stringe sul nuovo luogo),
+    // ma il tempo non segue un'easing: lungo la curva ogni tratto prende il tempo che serve a non superare
+    // un limite di velocità che dipende dalla quota (vedi FLY_*). Vicino a terra il limite è basso e scende
+    // ancora a ogni livello, quindi l'atterraggio è una frenata lunga e continua.
     var flyRaf = 0;
     function stopFly() { if (flyRaf) { cancelAnimationFrame(flyRaf); flyRaf = 0; } if (map._stop) map._stop(); }
     function softFly(center, zoom) {
@@ -329,28 +335,33 @@
       function w(x) { return w0 * (cosh(r0) / cosh(r0 + rho * x)); }
       function u(x) { return w0 * (cosh(r0) * tanh(r0 + rho * x) - sinh(r0)) / rho2; }
       function zoomAt(x) { return z0 + Math.log(w0 / w(x)) / Math.LN2; }
-      // costo cumulato = livelli di zoom percorsi lungo la curva; serve per far scorrere il tempo in modo uniforme
-      var M = 400, cum = [0], pz = zoomAt(0);
-      for (var i = 1; i <= M; i++) { var z = zoomAt(S * i / M); cum.push(cum[i - 1] + Math.abs(z - pz)); pz = z; }
-      var total = cum[M] || 1e-6;
-      function xOf(frac) {            // frazione di costo -> parametro della curva
-        var c = frac * total, k = 1;
-        while (k < M && cum[k] < c) k++;
-        var lo = cum[k - 1], hi = cum[k];
-        return S * (k - 1 + (hi > lo ? (c - lo) / (hi - lo) : 0)) / M;
+      // tabella tempo -> posizione sulla curva
+      var M = 600, dts = [0], low = [false], xs = [0], pz = zoomAt(0), pu = u(0);
+      for (var i = 1; i <= M; i++) {
+        var x = S * i / M, z = zoomAt(x), uu = u(x), zm = (z + pz) / 2;
+        var cost = Math.abs(z - pz) + FLY_PAN_W * Math.abs(uu - pu) / w(x);
+        var dEnd = Math.abs(zoom - zm), dStart = Math.abs(zm - z0);
+        var v = Math.min(FLY_VMAX, FLY_V_LAND + FLY_K_LAND * dEnd, FLY_V_TAKEOFF + FLY_K_TAKEOFF * dStart);
+        dts.push(cost / v); low.push(dEnd < FLY_LOW_LEVELS); xs.push(x); pz = z; pu = uu;
       }
-      function ease(t) {              // partenza dolce, frenata lunga verso terra
-        var a = 1 - Math.pow(1 - t, FLY_LANDING);
-        return -(Math.cos(Math.PI * a) - 1) / 2;
-      }
-      var dur = Math.max(FLY_MIN, Math.min(FLY_MAX, total / FLY_LEVELS_PER_SEC)) * 1000, t0 = null;
+      // Se il volo supera FLY_MAX si accorcia solo il tratto in quota: gli ultimi livelli verso terra restano lenti.
+      var Tlow = 0, Thigh = 0;
+      for (i = 1; i <= M; i++) { if (low[i]) Tlow += dts[i]; else Thigh += dts[i]; }
+      var kHigh = 1, kAll = 1, T0 = Tlow + Thigh;
+      if (T0 > FLY_MAX && Thigh > 0) kHigh = Math.max(0.35, (FLY_MAX - Tlow) / Thigh);
+      var T1 = Tlow + Thigh * kHigh;
+      if (T1 < FLY_MIN) kAll = FLY_MIN / Math.max(T1, 1e-6);
+      var times = [0];
+      for (i = 1; i <= M; i++) times.push(times[i - 1] + dts[i] * (low[i] ? 1 : kHigh) * kAll);
+      var T = times[M], j = 1, t0 = null;
       map._moveStart(true, false);
       (function frame(now) {
         if (t0 === null) t0 = now;
-        var t = Math.min(1, (now - t0) / dur);
-        if (t < 1) {
-          var x = xOf(ease(t));
-          map._move(map.unproject(from.add(to.subtract(from).multiplyBy(u(x) / u1)), z0), map.getScaleZoom(w0 / w(x), z0), { flyTo: true });
+        var el = (now - t0) / 1000;                // secondi dall'inizio del volo
+        if (el < T) {
+          while (j < M && times[j] < el) j++;
+          var lo = times[j - 1], hi = times[j], xx = xs[j - 1] + (xs[j] - xs[j - 1]) * (hi > lo ? (el - lo) / (hi - lo) : 0);
+          map._move(map.unproject(from.add(to.subtract(from).multiplyBy(u(xx) / u1)), z0), map.getScaleZoom(w0 / w(xx), z0), { flyTo: true });
           flyRaf = requestAnimationFrame(frame);
         } else {
           flyRaf = 0;
@@ -411,23 +422,42 @@
       flipLabels();
     }
     // Etichette: quella del luogo corrente e, in mappa generale, il nome della città (una per gruppo).
-    // Vanno a sinistra se il marker è vicino al bordo destro della mappa.
+    // Vanno sempre verso il centro della mappa: a sinistra del punto se il punto è nella metà destra,
+    // a destra se è nella metà sinistra. Vicino al centro restano dove sono (niente salti durante l'atterraggio).
+    // Se lo spazio verso il centro non basta, l'etichetta va a capo. Si ricalcola anche durante il volo.
+    var GAP = 20, EDGE = 6, DEAD = 24;
+    function towardCenter(el, px, W) {
+      var prev = el.classList.contains("is-flip");
+      return Math.abs(px - W / 2) < DEAD ? prev : px > W / 2;
+    }
+    function fitLabel(el, sel, px, W, flip) {
+      var lbl = el.querySelector(sel);
+      if (!lbl) return;
+      lbl.style.maxWidth = "";
+      var room = flip ? px - GAP - EDGE : W - EDGE - (px + GAP);
+      if (lbl.offsetWidth > room) lbl.style.maxWidth = Math.max(80, Math.floor(room)) + "px";
+    }
     function flipLabels() {
-      var size = map.getSize();
+      var W = map.getSize().x, overview = cur === 0 || cur === LAST;
       groups.forEach(function (g) {
-        var first = g.rows[0];
-        var p = map.latLngToContainerPoint(first.ll);
-        var flip = p.x > size.x - 240;
-        var labelRow = flip ? g.rows[0] : g.rows[g.rows.length - 1];
+        var first = g.rows[0], last = g.rows[g.rows.length - 1];
+        var firstEl = first.marker.getElement();
+        var gx = map.latLngToContainerPoint(first.ll).x;                    // centro del gruppo (i numeri sono affiancati attorno)
+        var gFlip = overview && firstEl ? towardCenter(firstEl, gx, W) : false;
+        var labelRow = gFlip ? first : last;
         g.rows.forEach(function (r) {
           var el = r.marker.getElement();
           if (!el) return;
+          var px = map.latLngToContainerPoint(r.ll).x + (overview ? r.ovDx : 0);
+          var flip = overview ? gFlip : (r.n === cur ? towardCenter(el, px, W) : false);
           el.classList.toggle("is-flip", flip);
           el.classList.toggle("is-ovl", r === labelRow);
+          if (overview && r === labelRow) fitLabel(el, ".sm__ovl", px, W, flip);
+          if (!overview && r.n === cur) fitLabel(el, ".sm__lbl", px, W, flip);
         });
       });
     }
-    map.on("moveend zoomend resize", flipLabels);
+    map.on("move zoom moveend zoomend resize", flipLabels);
 
     // ---------- Telecamera ----------
     function camera(step, prev) {
@@ -436,7 +466,7 @@
       if (prev === -1 || reduced) { map.setView(r.ll, r.zoom, { animate: false }); return; }
       var p = rows[prev - 1];
       // spostamento breve nella stessa città (San Giovanni ↔ San Giorgio): zoom più largo, si vedono entrambi i luoghi
-      if (p && Math.abs(prev - step) === 1 && p.city === r.city && p.ll.distanceTo(r.ll) < CLUSTER_METERS) {
+      if (p && Math.abs(prev - step) === 1 && p.ll.distanceTo(r.ll) < NEAR_HOP_METERS) {
         var t = map._getBoundsCenterZoom(L.latLngBounds([p.ll, r.ll]), { padding: [70, 70], maxZoom: 16 });
         goTo(t.center, t.zoom);
         return;
@@ -563,11 +593,17 @@
     // ---------- Scheda ----------
     var card = document.getElementById("card");
     var countToken = 0;
+    // Un big number per morti e uno per feriti. Se il valore è zero, mancante o da verificare il blocco non compare;
+    // se è un testo (le due chiese di Roma) compare il testo al posto del numero.
     function bnItem(value, label, raw) {
-      if (value != null) return '<div class="bn__item"><span class="bn__num" data-count="' + value + '">' + fmt(value) + '</span><span class="bn__lab">' + label + "</span></div>";
-      var txt = /^\[.*\]$/.test(raw) || raw === "" ? "n.d." : raw;
-      return '<div class="bn__item"><span class="bn__num bn__num--txt">' + esc(txt) + '</span><span class="bn__lab">' + label + "</span></div>";
+      if (value != null) {
+        if (value === 0) return "";
+        return '<div class="bn__item"><span class="bn__num" data-count="' + value + '">' + fmt(value) + '</span><span class="bn__lab">' + label + "</span></div>";
+      }
+      if (raw == null || raw === "" || /^\[.*\]$/.test(raw)) return "";
+      return '<div class="bn__item"><span class="bn__num bn__num--txt">' + esc(raw) + '</span><span class="bn__lab">' + label + "</span></div>";
     }
+    function bnBlock(items) { return items ? '<div class="bn">' + items + "</div>" : ""; }
     function totals() {
       var morti = d3.sum(rows, function (r) { return r.morti; });
       // feriti: i testi condivisi (le due chiese di Roma, "22 nei due attentati") contano una volta sola
@@ -602,7 +638,7 @@
           ? '<p class="c-note">Nel totale dei feriti non è incluso il dato di ' + t.missing.map(function (r) { return esc(r.titolo.replace(/^La strage di |^L'attentato di |^L'attentato a /, "")); }).join(", ") + ": non ancora verificato.</p>" : "";
         return '<div class="card__in">' +
           '<h2 class="c-title">Il bilancio della stagione delle stragi</h2>' +
-          '<div class="bn">' + bnItem(t.morti, plural(t.morti, "morto", "morti")) + bnItem(t.feriti, plural(t.feriti, "ferito", "feriti")) + "</div>" +
+          bnBlock(bnItem(t.morti, plural(t.morti, "morto", "morti")) + bnItem(t.feriti, plural(t.feriti, "ferito", "feriti"))) +
           '<p class="c-p" style="margin-top:16px">' + sentence + ".</p>" + note +
           '<div class="c-act" style="margin-top:16px"><button type="button" class="btn btn--primary" data-act="restart">Ricomincia</button></div></div>';
       }
@@ -622,7 +658,7 @@
         '<h3 class="c-h">Cosa è successo</h3><p class="c-p">' + esc(r.cosa) + "</p>" +
         '<h3 class="c-h">Perché</h3><p class="c-p">' + esc(r.perche) + "</p>" +
         '<h3 class="c-h">Il bilancio</h3>' +
-        '<div class="bn">' + bnItem(r.morti, plural(r.morti, "morto", "morti")) + bnItem(r.feriti, r.feriti === 1 ? "ferito" : "feriti", r.feritiRaw) + "</div>" +
+        bnBlock(bnItem(r.morti, plural(r.morti, "morto", "morti")) + bnItem(r.feriti, r.feriti === 1 ? "ferito" : "feriti", r.feritiRaw)) +
         (r.vittime.length ? '<p class="c-names">' + r.vittime.map(esc).join(" · ") + "</p>" : "") +
         (r.nota ? '<p class="c-note">' + esc(r.nota) + "</p>" : "") + "</div>";
     }
