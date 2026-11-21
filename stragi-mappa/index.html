@@ -227,7 +227,10 @@
   // ---------- Costanti di configurazione ----------
   var TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
   var TILE_ATTRIBUTION = '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors';
-  var FLY_MIN = 2.6, FLY_MAX = 4.6;   // secondi: durata minima e massima del volo tra due luoghi
+  var FLY_MIN = 3.4, FLY_MAX = 7.5;   // secondi: durata minima e massima del volo tra due luoghi
+  var FLY_LEVELS_PER_SEC = 2.3;      // velocità media di zoom: più basso = volo più lento
+  var FLY_LANDING = 1.5;             // quanto si allunga la frenata verso terra (1 = nessuna, più alto = più lenta)
+  var FLY_ARC = 1.2;                 // quanto si allarga il volo a metà strada (più alto = si allontana di più)
   var OV_SPACING = 27;               // px tra i numeri affiancati in mappa generale
   var CLUSTER_METERS = 15000;     // luoghi della stessa città più vicini di così: numeri affiancati in mappa generale
 
@@ -300,21 +303,20 @@
     function overviewTarget() { return map._getBoundsCenterZoom(allBounds, FIT); }
 
     // ---------- Volo morbido ----------
-    // Stessa traiettoria di Leaflet flyTo (si allarga sulle lunghe distanze, poi si stringe sul nuovo luogo),
-    // ma con partenza e arrivo dolci (ease in-out) e una durata che cresce con la distanza.
+    // Stessa traiettoria di Leaflet flyTo (si allarga sulle lunghe distanze, poi si stringe sul nuovo luogo), ma:
+    //  - il tempo scorre sui "livelli di zoom percorsi", non sul parametro della curva: la velocità di zoom resta contenuta
+    //    (picchi sotto i 4 livelli al secondo, e meno di 2 nell'ultimo tratto, contro i ~10 di un'easing normale) e non si concentra nell'avvicinamento;
+    //  - partenza dolce e frenata molto lunga verso terra (FLY_LANDING);
+    //  - la durata cresce con il percorso (FLY_LEVELS_PER_SEC), tra FLY_MIN e FLY_MAX.
     var flyRaf = 0;
     function stopFly() { if (flyRaf) { cancelAnimationFrame(flyRaf); flyRaf = 0; } if (map._stop) map._stop(); }
-    function flySeconds(center, zoom) {
-      var km = map.getCenter().distanceTo(center) / 1000;
-      return Math.max(FLY_MIN, Math.min(FLY_MAX, FLY_MIN + km / 300 + Math.abs(zoom - map.getZoom()) * 0.1));
-    }
-    function softFly(center, zoom, seconds) {
+    function softFly(center, zoom) {
       stopFly();
       center = L.latLng(center);
       var size = map.getSize(), z0 = map.getZoom();
       var from = map.project(map.getCenter(), z0), to = map.project(center, z0);
       var w0 = Math.max(size.x, size.y), w1 = w0 * map.getZoomScale(z0, zoom), u1 = to.distanceTo(from) || 1;
-      var rho = 1.42, rho2 = rho * rho;
+      var rho = FLY_ARC, rho2 = rho * rho;
       function sinh(n) { return (Math.exp(n) - Math.exp(-n)) / 2; }
       function cosh(n) { return (Math.exp(n) + Math.exp(-n)) / 2; }
       function tanh(n) { return sinh(n) / cosh(n); }
@@ -326,13 +328,28 @@
       var r0 = r(0), S = (r(1) - r0) / rho;
       function w(x) { return w0 * (cosh(r0) / cosh(r0 + rho * x)); }
       function u(x) { return w0 * (cosh(r0) * tanh(r0 + rho * x) - sinh(r0)) / rho2; }
-      var ease = d3.easeCubicInOut, dur = seconds * 1000, t0 = null;
+      function zoomAt(x) { return z0 + Math.log(w0 / w(x)) / Math.LN2; }
+      // costo cumulato = livelli di zoom percorsi lungo la curva; serve per far scorrere il tempo in modo uniforme
+      var M = 400, cum = [0], pz = zoomAt(0);
+      for (var i = 1; i <= M; i++) { var z = zoomAt(S * i / M); cum.push(cum[i - 1] + Math.abs(z - pz)); pz = z; }
+      var total = cum[M] || 1e-6;
+      function xOf(frac) {            // frazione di costo -> parametro della curva
+        var c = frac * total, k = 1;
+        while (k < M && cum[k] < c) k++;
+        var lo = cum[k - 1], hi = cum[k];
+        return S * (k - 1 + (hi > lo ? (c - lo) / (hi - lo) : 0)) / M;
+      }
+      function ease(t) {              // partenza dolce, frenata lunga verso terra
+        var a = 1 - Math.pow(1 - t, FLY_LANDING);
+        return -(Math.cos(Math.PI * a) - 1) / 2;
+      }
+      var dur = Math.max(FLY_MIN, Math.min(FLY_MAX, total / FLY_LEVELS_PER_SEC)) * 1000, t0 = null;
       map._moveStart(true, false);
       (function frame(now) {
         if (t0 === null) t0 = now;
         var t = Math.min(1, (now - t0) / dur);
         if (t < 1) {
-          var x = ease(t) * S;
+          var x = xOf(ease(t));
           map._move(map.unproject(from.add(to.subtract(from).multiplyBy(u(x) / u1)), z0), map.getScaleZoom(w0 / w(x), z0), { flyTo: true });
           flyRaf = requestAnimationFrame(frame);
         } else {
@@ -341,9 +358,9 @@
         }
       })(performance.now());
     }
-    function goTo(center, zoom, seconds) {
+    function goTo(center, zoom) {
       if (reduced) { map.setView(center, zoom, { animate: false }); return; }
-      softFly(center, zoom, seconds || flySeconds(center, zoom));
+      softFly(center, zoom);
     }
     function fitAll(animate) {
       var t = overviewTarget();
@@ -421,7 +438,7 @@
       // spostamento breve nella stessa città (San Giovanni ↔ San Giorgio): zoom più largo, si vedono entrambi i luoghi
       if (p && Math.abs(prev - step) === 1 && p.city === r.city && p.ll.distanceTo(r.ll) < CLUSTER_METERS) {
         var t = map._getBoundsCenterZoom(L.latLngBounds([p.ll, r.ll]), { padding: [70, 70], maxZoom: 16 });
-        goTo(t.center, t.zoom, 2.4);
+        goTo(t.center, t.zoom);
         return;
       }
       // il volo si allarga da solo sulle lunghe distanze (Palermo-Roma, Roma-Firenze, …)
@@ -591,9 +608,12 @@
       }
       var r = rows[step - 1];
       var f = foto[r.n];
+      var credit = f ? [f.autore, f.licenza].filter(Boolean).join(", ") : "";
       var fig = f ? '<figure class="c-fig"><img class="c-fig__img" src="../assets/foto/' + esc(f.file) + '" alt="' + esc(f.didascalia) + '" loading="lazy" decoding="async"' +
         (f.posizione ? ' style="object-position:' + esc(f.posizione) + '"' : "") + ">" +
-        "<figcaption>" + esc(f.didascalia) + " Foto: " + esc(f.autore) + ", " + esc(f.licenza) + (f.fonte ? ' (<a href="' + esc(f.fonte) + '" target="_blank" rel="noopener">fonte</a>)' : "") + ".</figcaption></figure>" : "";
+        "<figcaption>" + esc(f.didascalia) +
+        (credit ? " Foto: " + esc(credit) : "") +
+        (f.fonte ? ' (<a href="' + esc(f.fonte) + '" target="_blank" rel="noopener">fonte</a>)' : "") + "</figcaption></figure>" : "";
       var when = longDate(r.date) + " · " + (r.hasTime ? "ore " + r.ora : r.ora) + " · " + r.citta;
       return '<div class="card__in">' +
         '<p class="c-meta">' + esc(when) + "</p>" +
