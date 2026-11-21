@@ -10,6 +10,6 @@ ordine;file;posizione;didascalia;autore;licenza;fonte
 - `ordine`: numero della strage, come nella colonna `ordine` di `stragi.csv` (1-7).
 - `file`: nome del file in questa cartella.
 - `posizione` (facoltativa): punto dell'immagine da tenere nel ritaglio, per esempio `50% 30%`. La foto è mostrata in un riquadro 3:2.
-- `didascalia`, `autore`, `licenza`, `fonte`: compaiono sotto la foto come "Didascalia. Foto: autore, licenza, via Wikimedia Commons" con il link alla fonte.
+- `didascalia`, `autore`, `licenza`, `fonte`: compaiono sotto la foto come "Didascalia. Foto: autore, licenza (fonte)", con il link alla fonte se presente.
 
 Le schede senza riga in `foto.csv` restano senza foto.

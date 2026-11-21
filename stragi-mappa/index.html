@@ -593,7 +593,7 @@
       var f = foto[r.n];
       var fig = f ? '<figure class="c-fig"><img class="c-fig__img" src="../assets/foto/' + esc(f.file) + '" alt="' + esc(f.didascalia) + '" loading="lazy" decoding="async"' +
         (f.posizione ? ' style="object-position:' + esc(f.posizione) + '"' : "") + ">" +
-        "<figcaption>" + esc(f.didascalia) + " Foto: " + esc(f.autore) + ", " + esc(f.licenza) + ', via <a href="' + esc(f.fonte) + '" target="_blank" rel="noopener">Wikimedia Commons</a>.</figcaption></figure>" : "";
+        "<figcaption>" + esc(f.didascalia) + " Foto: " + esc(f.autore) + ", " + esc(f.licenza) + (f.fonte ? ' (<a href="' + esc(f.fonte) + '" target="_blank" rel="noopener">fonte</a>)' : "") + ".</figcaption></figure>" : "";
       var when = longDate(r.date) + " · " + (r.hasTime ? "ore " + r.ora : r.ora) + " · " + r.citta;
       return '<div class="card__in">' +
         '<p class="c-meta">' + esc(when) + "</p>" +
