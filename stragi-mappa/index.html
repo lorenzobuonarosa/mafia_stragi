@@ -660,7 +660,7 @@
         '<h3 class="c-h">Il bilancio</h3>' +
         bnBlock(bnItem(r.morti, plural(r.morti, "morto", "morti")) + bnItem(r.feriti, r.feriti === 1 ? "ferito" : "feriti", r.feritiRaw)) +
         (r.vittime.length ? '<p class="c-names">' + r.vittime.map(esc).join(" · ") + "</p>" : "") +
-        (r.nota ? '<p class="c-note">' + esc(r.nota) + "</p>" : "") + "</div>";
+        "</div>";   // la colonna nota_bilancio resta nel CSV ma non si mostra
     }
     function renderCard() {
       card.innerHTML = cardHTML(cur);
