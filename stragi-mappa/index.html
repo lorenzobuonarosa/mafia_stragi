@@ -50,8 +50,12 @@
   .sm__dot {
     position: absolute; left: 0; top: 0; transform: translate(-50%, -50%);
     border-radius: 50%; box-sizing: border-box; pointer-events: none;
+    display: grid; place-items: center; color: var(--bg);
+    font: 700 0/1 var(--sans); font-variant-numeric: tabular-nums;     /* il numero si vede solo in mappa generale */
     transition: width .3s ease, height .3s ease, background-color .3s ease, border-color .3s ease;
   }
+  /* mappa generale (passo 0 e chiusura): cerchi numerati, affiancati dove i luoghi sono vicini */
+  .sm.is-ov .sm__pin { transform: translateX(var(--dx, 0px)); }
   /* passo 0: tutti grigi */
   .sm.is-idle   .sm__dot { width: 13px; height: 13px; background: var(--grey); border: 2px solid var(--bg); }
   /* futuri: solo contorno grigio */
@@ -60,14 +64,8 @@
   .sm.is-seen   .sm__dot { width: 9px; height: 9px; background: var(--grey-dark); border: 1.5px solid var(--bg); }
   /* corrente: rosso pieno */
   .sm.is-current .sm__dot { width: 18px; height: 18px; background: var(--red); border: 2.5px solid var(--bg); box-shadow: 0 0 0 1px var(--red); }
-  .sm.is-hidden { display: none; }
-  /* gruppo (le tre stragi di Roma a zoom nazionale) */
-  .sm.is-cluster .sm__dot {
-    width: 26px; height: 26px; background: var(--grey-dark); border: 2px solid var(--bg);
-    display: grid; place-items: center; color: var(--bg);
-    font: 700 13px/1 var(--sans); font-variant-numeric: tabular-nums;
-  }
-
+  /* in mappa generale i cerchi numerati prevalgono sugli stati piccoli */
+  .sm.is-ov.is-idle .sm__dot, .sm.is-ov.is-seen .sm__dot { width: 24px; height: 24px; font-size: 12px; background: var(--grey-dark); border: 2px solid var(--bg); }
   /* Punto pulsante tipo sonar: onde concentriche che partono dal luogo, di continuo.
      Una zona morbida sotto + tre anelli sfasati. */
   .sm__zone, .sm__r { position: absolute; left: 0; top: 0; border-radius: 50%; pointer-events: none; display: none; }
@@ -101,10 +99,16 @@
     font: 600 13px/1.25 var(--sans); color: var(--ink); pointer-events: none;
     text-shadow: 0 0 2px var(--bg), 0 0 3px var(--bg), 0 0 5px var(--bg), 0 0 8px var(--bg);
   }
-  .sm.is-current .sm__lbl, .sm.is-cluster .sm__lbl { display: block; }
+  .sm.is-current .sm__lbl { display: block; }
   .sm.is-flip .sm__lbl { left: auto; right: 17px; text-align: right; }
-  .sm.is-cluster .sm__lbl { left: 20px; }
-  .sm.is-cluster.is-flip .sm__lbl { left: auto; right: 20px; }
+  /* nome della città accanto ai numeri, solo in mappa generale e una volta per gruppo */
+  .sm__ovl {
+    position: absolute; left: 20px; top: 0; transform: translateY(-50%); display: none; white-space: nowrap;
+    font: 600 13px/1.2 var(--sans); color: var(--ink); pointer-events: none;
+    text-shadow: 0 0 2px var(--bg), 0 0 3px var(--bg), 0 0 5px var(--bg), 0 0 8px var(--bg);
+  }
+  .sm.is-ov.is-ovl .sm__ovl { display: block; }
+  .sm.is-ov.is-flip .sm__ovl { left: auto; right: 20px; }
 
   /* ---------- Striscia temporale ---------- */
   .tl { position: relative; margin: 14px 0 0; }
@@ -165,6 +169,13 @@
   .c-note { font-size: 12.5px; line-height: 1.5; color: var(--ink-2); margin: 8px 0 0; }
   .c-act { margin-top: 4px; }
 
+
+  /* ---------- Foto nella scheda ---------- */
+  .c-fig { margin: 0 0 16px; }
+  .c-fig__img { display: block; width: 100%; aspect-ratio: 3 / 2; max-height: 340px; object-fit: cover; background: var(--grey-5); }
+  .c-fig figcaption { font-size: 12px; line-height: 1.45; color: var(--ink-2); margin: 6px 0 0; }
+  .c-fig figcaption a { color: inherit; text-decoration: underline; }
+
   .bn { display: flex; flex-wrap: wrap; gap: 8px 36px; margin: 4px 0 0; align-items: flex-start; }
   .bn__item { min-width: 0; }
   .bn__num {
@@ -216,8 +227,9 @@
   // ---------- Costanti di configurazione ----------
   var TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
   var TILE_ATTRIBUTION = '© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors';
-  var FLY_SECONDS = 2.5;
-  var CLUSTER_METERS = 15000;     // punti della stessa città più vicini di così: un solo marker a zoom nazionale
+  var FLY_MIN = 2.6, FLY_MAX = 4.6;   // secondi: durata minima e massima del volo tra due luoghi
+  var OV_SPACING = 27;               // px tra i numeri affiancati in mappa generale
+  var CLUSTER_METERS = 15000;     // luoghi della stessa città più vicini di così: numeri affiancati in mappa generale
 
   // Riferimenti storici sulla striscia temporale (grigi, non sono stragi)
   var REFS = [
@@ -238,9 +250,15 @@
   function plural(n, one, many) { return n === 1 ? one : many; }
 
   // ---------- Dati ----------
-  R.loadCSV("../data/stragi.csv").then(init).catch(function (e) { R.fail(document.getElementById("card"), e); });
+  // Le foto stanno in un CSV a parte (data/foto.csv): ordine;file;posizione;didascalia;autore;licenza;fonte.
+  // Se manca o non si legge, le schede restano senza foto.
+  Promise.all([R.loadCSV("../data/stragi.csv"), R.loadCSV("../data/foto.csv").catch(function () { return []; })])
+    .then(function (res) { init(res[0], res[1]); })
+    .catch(function (e) { R.fail(document.getElementById("card"), e); });
 
-  function init(raw) {
+  function init(raw, fotoRows) {
+    var foto = {};
+    fotoRows.forEach(function (f) { foto[+f.ordine] = f; });
     // Nota: lat/lon nel CSV hanno il punto decimale (WGS84), quindi parseFloat e non Radar.num.
     var rows = raw.map(function (r) {
       var dm = r.data.split("/");
@@ -274,85 +292,123 @@
     });
     map.attributionControl.setPrefix(false);
     map.attributionControl.setPosition("bottomright");
-    L.tileLayer(TILE_URL, { attribution: TILE_ATTRIBUTION, maxZoom: 19 }).addTo(map);
+    // aggiorna i tile anche durante il volo e tiene un buffer largo: meno vuoti mentre la mappa si sposta
+    L.tileLayer(TILE_URL, { attribution: TILE_ATTRIBUTION, maxZoom: 19, updateWhenIdle: false, updateWhenZooming: true, updateInterval: 120, keepBuffer: 4 }).addTo(map);
 
     var allBounds = L.latLngBounds(rows.map(function (r) { return r.ll; }));
-    var FIT = { padding: [36, 36] };
+    var FIT = { padding: [40, 40] };
+    function overviewTarget() { return map._getBoundsCenterZoom(allBounds, FIT); }
+
+    // ---------- Volo morbido ----------
+    // Stessa traiettoria di Leaflet flyTo (si allarga sulle lunghe distanze, poi si stringe sul nuovo luogo),
+    // ma con partenza e arrivo dolci (ease in-out) e una durata che cresce con la distanza.
+    var flyRaf = 0;
+    function stopFly() { if (flyRaf) { cancelAnimationFrame(flyRaf); flyRaf = 0; } if (map._stop) map._stop(); }
+    function flySeconds(center, zoom) {
+      var km = map.getCenter().distanceTo(center) / 1000;
+      return Math.max(FLY_MIN, Math.min(FLY_MAX, FLY_MIN + km / 300 + Math.abs(zoom - map.getZoom()) * 0.1));
+    }
+    function softFly(center, zoom, seconds) {
+      stopFly();
+      center = L.latLng(center);
+      var size = map.getSize(), z0 = map.getZoom();
+      var from = map.project(map.getCenter(), z0), to = map.project(center, z0);
+      var w0 = Math.max(size.x, size.y), w1 = w0 * map.getZoomScale(z0, zoom), u1 = to.distanceTo(from) || 1;
+      var rho = 1.42, rho2 = rho * rho;
+      function sinh(n) { return (Math.exp(n) - Math.exp(-n)) / 2; }
+      function cosh(n) { return (Math.exp(n) + Math.exp(-n)) / 2; }
+      function tanh(n) { return sinh(n) / cosh(n); }
+      function r(i) {
+        var s1 = i ? -1 : 1, s2 = i ? w1 : w0, t1 = w1 * w1 - w0 * w0 + s1 * rho2 * rho2 * u1 * u1,
+          b1 = 2 * s2 * rho2 * u1, b = t1 / b1, sq = Math.sqrt(b * b + 1) - b;
+        return sq < 1e-9 ? -18 : Math.log(sq);
+      }
+      var r0 = r(0), S = (r(1) - r0) / rho;
+      function w(x) { return w0 * (cosh(r0) / cosh(r0 + rho * x)); }
+      function u(x) { return w0 * (cosh(r0) * tanh(r0 + rho * x) - sinh(r0)) / rho2; }
+      var ease = d3.easeCubicInOut, dur = seconds * 1000, t0 = null;
+      map._moveStart(true, false);
+      (function frame(now) {
+        if (t0 === null) t0 = now;
+        var t = Math.min(1, (now - t0) / dur);
+        if (t < 1) {
+          var x = ease(t) * S;
+          map._move(map.unproject(from.add(to.subtract(from).multiplyBy(u(x) / u1)), z0), map.getScaleZoom(w0 / w(x), z0), { flyTo: true });
+          flyRaf = requestAnimationFrame(frame);
+        } else {
+          flyRaf = 0;
+          map._move(center, zoom)._moveEnd(true);
+        }
+      })(performance.now());
+    }
+    function goTo(center, zoom, seconds) {
+      if (reduced) { map.setView(center, zoom, { animate: false }); return; }
+      softFly(center, zoom, seconds || flySeconds(center, zoom));
+    }
     function fitAll(animate) {
-      if (animate && !reduced) map.flyToBounds(allBounds, { padding: FIT.padding, duration: FLY_SECONDS });
-      else map.fitBounds(allBounds, { padding: FIT.padding, animate: false });
+      var t = overviewTarget();
+      if (animate) goTo(t.center, t.zoom); else map.setView(t.center, t.zoom, { animate: false });
     }
     fitAll(false);
 
-    // ---------- Gruppi di punti vicini (a zoom nazionale un solo marker con il numero) ----------
-    // Roma (3 attentati) e Palermo (Capaci e via D'Amelio, a ~10 km) a zoom nazionale sarebbero pallini sovrapposti.
-    var clusters = [];
+    // ---------- Marker numerati ----------
+    // Mappa generale: ogni luogo è un cerchio con il suo numero (1, 2, 3…). I luoghi quasi sovrapposti a quello zoom
+    // (Capaci e via D'Amelio, le tre di Roma) vengono affiancati di qualche pixel, in ordine, senza spostare il punto vero.
+    var groups = [];
     d3.group(rows, function (r) { return r.city; }).forEach(function (grp, city) {
       var rest = grp.slice();
       while (rest.length) {
         var base = rest.shift();
         var near = [base].concat(rest.filter(function (g) { return g.ll.distanceTo(base.ll) < CLUSTER_METERS; }));
         rest = rest.filter(function (g) { return near.indexOf(g) < 0; });
-        if (near.length < 2) continue;
-        near.forEach(function (g) { g.inCluster = true; });
-        clusters.push({
-          rows: near, city: city,
-          ll: L.latLng(d3.mean(near, function (g) { return g.ll.lat; }), d3.mean(near, function (g) { return g.ll.lng; }))
-        });
+        near.sort(function (a, b) { return a.n - b.n; });
+        near.forEach(function (g, i) { g.ovDx = Math.round((i - (near.length - 1) / 2) * OV_SPACING); });
+        groups.push({ rows: near, city: city });
       }
     });
 
-    function pinHTML(label, inner) {
+    function pinHTML(r) {
       return '<div class="sm__pin"><i class="sm__zone"></i><i class="sm__r sm__r1"></i><i class="sm__r sm__r2"></i><i class="sm__r sm__r3"></i>' +
-        '<i class="sm__hit"></i><b class="sm__dot">' + (inner || "") + '</b><span class="sm__lbl">' + esc(label) + "</span></div>";
-    }
-    function makeMarker(ll, cls, html, title) {
-      var m = L.marker(ll, {
-        icon: L.divIcon({ className: "sm " + cls, html: html, iconSize: [0, 0], iconAnchor: [0, 0] }),
-        title: title, alt: title, keyboard: true, riseOnHover: false
-      });
-      m.addTo(map);
-      return m;
+        '<i class="sm__hit"></i><b class="sm__dot">' + r.n + '</b><span class="sm__lbl">' + esc(r.luogo) + '</span><span class="sm__ovl">' + esc(r.city) + "</span></div>";
     }
     rows.forEach(function (r) {
-      r.marker = makeMarker(r.ll, "is-future", pinHTML(r.luogo), r.luogo);
+      r.marker = L.marker(r.ll, {
+        icon: L.divIcon({ className: "sm is-future", html: pinHTML(r), iconSize: [0, 0], iconAnchor: [0, 0] }),
+        title: r.n + ". " + r.luogo, alt: r.luogo, keyboard: true, riseOnHover: false
+      }).addTo(map);
       r.marker.on("click", function () { go(r.n); });
     });
-    clusters.forEach(function (c) {
-      c.marker = makeMarker(c.ll, "is-cluster", pinHTML(c.city, String(c.rows.length)), c.city + ": " + c.rows.length + " attentati");
-      c.marker.on("click", function () { go(c.rows[0].n); });
-    });
-    function setState(marker, state, extra) {
-      var el = marker.getElement();
-      if (!el) return;
-      el.className = el.className.replace(/\bis-(idle|future|seen|current|hidden|cluster)\b/g, "").replace(/\s+/g, " ").trim();
-      el.classList.add("is-" + state);
-      if (extra) el.classList.add(extra);
-    }
     function updateMarkers() {
+      var overview = cur === 0 || cur === LAST;
       rows.forEach(function (r) {
-        var state;
-        if (cur === 0) state = "idle";
-        else if (cur === LAST) state = "seen";
-        else state = r.n === cur ? "current" : (r.n < cur ? "seen" : "future");
-        if (r.inCluster && cur === 0) state = "hidden";
-        setState(r.marker, state);
+        var state = cur === 0 ? "idle" : (cur === LAST ? "seen" : (r.n === cur ? "current" : (r.n < cur ? "seen" : "future")));
+        var el = r.marker.getElement();
+        if (el) {
+          el.className = el.className.replace(/\bis-(idle|future|seen|current|ov)\b/g, "").replace(/\s+/g, " ").trim();
+          el.classList.add("is-" + state);
+          if (overview) el.classList.add("is-ov");
+          el.style.setProperty("--dx", overview ? r.ovDx + "px" : "0px");
+        }
         r.marker.setZIndexOffset(state === "current" ? 1000 : (state === "seen" ? 100 : 0));
       });
-      clusters.forEach(function (c) { setState(c.marker, cur === 0 ? "cluster" : "hidden"); });
       flipLabels();
     }
-    // etichetta a sinistra se il marker è vicino al bordo destro della mappa
+    // Etichette: quella del luogo corrente e, in mappa generale, il nome della città (una per gruppo).
+    // Vanno a sinistra se il marker è vicino al bordo destro della mappa.
     function flipLabels() {
       var size = map.getSize();
-      function flip(marker) {
-        var el = marker.getElement();
-        if (!el) return;
-        var p = map.latLngToContainerPoint(marker.getLatLng());
-        el.classList.toggle("is-flip", p.x > size.x - 240);
-      }
-      rows.forEach(function (r) { flip(r.marker); });
-      clusters.forEach(function (c) { flip(c.marker); });
+      groups.forEach(function (g) {
+        var first = g.rows[0];
+        var p = map.latLngToContainerPoint(first.ll);
+        var flip = p.x > size.x - 240;
+        var labelRow = flip ? g.rows[0] : g.rows[g.rows.length - 1];
+        g.rows.forEach(function (r) {
+          var el = r.marker.getElement();
+          if (!el) return;
+          el.classList.toggle("is-flip", flip);
+          el.classList.toggle("is-ovl", r === labelRow);
+        });
+      });
     }
     map.on("moveend zoomend resize", flipLabels);
 
@@ -364,11 +420,12 @@
       var p = rows[prev - 1];
       // spostamento breve nella stessa città (San Giovanni ↔ San Giorgio): zoom più largo, si vedono entrambi i luoghi
       if (p && Math.abs(prev - step) === 1 && p.city === r.city && p.ll.distanceTo(r.ll) < CLUSTER_METERS) {
-        map.flyToBounds(L.latLngBounds([p.ll, r.ll]), { padding: [70, 70], maxZoom: 16, duration: 1.6 });
+        var t = map._getBoundsCenterZoom(L.latLngBounds([p.ll, r.ll]), { padding: [70, 70], maxZoom: 16 });
+        goTo(t.center, t.zoom, 2.4);
         return;
       }
-      // il volo di Leaflet si allarga da solo sulle lunghe distanze (Palermo-Roma, Roma-Firenze, …)
-      map.flyTo(r.ll, r.zoom, { duration: FLY_SECONDS });
+      // il volo si allarga da solo sulle lunghe distanze (Palermo-Roma, Roma-Firenze, …)
+      goTo(r.ll, r.zoom);
     }
 
     // ---------- Striscia temporale ----------
@@ -533,10 +590,14 @@
           '<div class="c-act" style="margin-top:16px"><button type="button" class="btn btn--primary" data-act="restart">Ricomincia</button></div></div>';
       }
       var r = rows[step - 1];
+      var f = foto[r.n];
+      var fig = f ? '<figure class="c-fig"><img class="c-fig__img" src="../assets/foto/' + esc(f.file) + '" alt="' + esc(f.didascalia) + '" loading="lazy" decoding="async"' +
+        (f.posizione ? ' style="object-position:' + esc(f.posizione) + '"' : "") + ">" +
+        "<figcaption>" + esc(f.didascalia) + " Foto: " + esc(f.autore) + ", " + esc(f.licenza) + ', via <a href="' + esc(f.fonte) + '" target="_blank" rel="noopener">Wikimedia Commons</a>.</figcaption></figure>" : "";
       var when = longDate(r.date) + " · " + (r.hasTime ? "ore " + r.ora : r.ora) + " · " + r.citta;
       return '<div class="card__in">' +
         '<p class="c-meta">' + esc(when) + "</p>" +
-        '<h2 class="c-title">' + esc(r.titolo) + "</h2>" +
+        '<h2 class="c-title">' + esc(r.titolo) + "</h2>" + fig +
         '<h3 class="c-h">Obiettivo</h3><p class="c-p">' + esc(r.obiettivo) + "</p>" +
         '<h3 class="c-h">Cosa è successo</h3><p class="c-p">' + esc(r.cosa) + "</p>" +
         '<h3 class="c-h">Perché</h3><p class="c-p">' + esc(r.perche) + "</p>" +
